@@ -185,6 +185,9 @@ def get_config(
             base_container_image=base_container_image,
             enable_auto_lint=True,
             use_host_network=False,
+            runtime_extra_build_args=json.loads(
+                os.environ.get('RUNTIME_EXTRA_BUILD_ARGS', 'null')
+            ),
             # large enough timeout, since some testcases take very long to run
             timeout=300,
             # Add platform to the sandbox config to solve issue 4401
@@ -414,10 +417,13 @@ def complete_runtime(
 
     n_retries = 0
     git_patch = None
+    patch_end_marker = '__OPENHANDS_PATCH_END__'
     while n_retries < 5:
         action = CmdRunAction(
-            command=f'git diff --no-color --cached {instance["base_commit"]}',
-            keep_prompt=False,
+            command=(
+                f'git diff --no-color --cached {instance["base_commit"]}; '
+                f'printf %s {patch_end_marker}'
+            ),
         )
         action.timeout = 600 + 100 * n_retries
         logger.info(action, extra={'msg_type': 'ACTION'})
@@ -426,7 +432,9 @@ def complete_runtime(
         n_retries += 1
         if isinstance(obs, CmdOutputObservation):
             if obs.exit_code == 0:
-                git_patch = obs.content.strip()
+                if not obs.content.endswith(patch_end_marker):
+                    raise RuntimeError('Git patch end marker missing from runtime output')
+                git_patch = obs.content[: -len(patch_end_marker)]
                 break
             else:
                 logger.info('Failed to get git diff, retrying...')
