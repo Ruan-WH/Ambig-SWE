@@ -97,7 +97,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
             "Your thinking should be thorough and so it's fine if it's very long.\n"
         )
 
-    if RUN_WITH_BROWSING:
+    if not RUN_WITH_BROWSING:
         instruction += (
             '<IMPORTANT!>\n'
             'You SHOULD NEVER attempt to browse the web. '
