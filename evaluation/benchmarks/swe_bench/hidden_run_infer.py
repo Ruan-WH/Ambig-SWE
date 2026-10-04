@@ -4,7 +4,6 @@ import os
 import tempfile
 from typing import Any
 
-import openai
 import pandas as pd
 import toml
 
@@ -38,46 +37,7 @@ from openhands.utils.shutdown_listener import sleep_if_should_continue
 
 USE_HINT_TEXT = os.environ.get('USE_HINT_TEXT', 'false').lower() == 'true'
 USE_INSTANCE_IMAGE = os.environ.get('USE_INSTANCE_IMAGE', 'false').lower() == 'true'
-RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'false'
-
-client = openai.OpenAI(
-    api_key=os.environ['API_KEY'],
-)
-
-
-class FakeUser:
-    def __init__(self, issue, hidden_details):
-        self.system_message = f"""
-        You are a GitHub user reporting an issue. Here are the details of your issue and environment:
-
-        Issue: {issue}
-
-        Hidden details (only reveal if specifically asked):
-        {' '.join(hidden_details)}
-
-        Your task is to respond to questions from a coder who is trying to solve your issue. Follow these rules:
-        1. If the coder asks a question that is directly related to the hidden details, provide that information.
-        2. If the question is not related to the hidden details, respond based on the original issue description.
-        3. If you're unsure whether to reveal information, err on the side of caution and don't reveal it.
-        4. Always stay in character as a user reporting an issue, not as an AI assistant.
-        5. Keep your responses concise and to the point.
-
-        Respond with "I don't have that information" if the question is unrelated or you're unsure.
-        """
-        self.chat_history = [{'role': 'system', 'content': self.system_message}]
-
-    def generate_reply(self, question):
-        self.chat_history.append({'role': 'user', 'content': question})
-
-        response = client.chat.completions.create(
-            model='neulab/claude-3-5-sonnet-20240620', messages=self.chat_history
-        )
-
-        reply = response.choices[0].message.content
-        self.chat_history.append({'role': 'assistant', 'content': reply})
-
-        return reply
-
+RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
 
 AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
     'CodeActAgent': lambda state: fake_user_response(state),
@@ -187,6 +147,9 @@ def get_config(
             use_host_network=False,
             runtime_extra_build_args=json.loads(
                 os.environ.get('RUNTIME_EXTRA_BUILD_ARGS', 'null')
+            ),
+            docker_runtime_kwargs=json.loads(
+                os.environ.get('DOCKER_RUNTIME_KWARGS', 'null')
             ),
             # large enough timeout, since some testcases take very long to run
             timeout=300,

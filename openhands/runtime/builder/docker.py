@@ -142,6 +142,7 @@ class DockerRuntimeBuilder(RuntimeBuilder):
             '================ DOCKER BUILD STARTED ================'
         )
 
+        output_lines: list[str] = []
         try:
             process = subprocess.Popen(
                 buildx_cmd,
@@ -153,6 +154,7 @@ class DockerRuntimeBuilder(RuntimeBuilder):
 
             if process.stdout:
                 for line in iter(process.stdout.readline, ''):
+                    output_lines.append(line)
                     line = line.strip()
                     if line:
                         self._output_logs(line)
@@ -163,7 +165,7 @@ class DockerRuntimeBuilder(RuntimeBuilder):
                 raise subprocess.CalledProcessError(
                     return_code,
                     process.args,
-                    output=process.stdout.read() if process.stdout else None,
+                    output=''.join(output_lines),
                     stderr=process.stderr.read() if process.stderr else None,
                 )
 

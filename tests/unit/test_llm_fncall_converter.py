@@ -684,3 +684,52 @@ def test_convert_from_multiple_tool_calls_no_tool_calls():
         input_messages
     )
     assert result == input_messages
+
+
+@pytest.mark.parametrize(
+    'content',
+    [
+        '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="execute_bash">\n<｜｜DSML｜｜ parameter name="command" string="true">pwd && ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+        'Checking the repository.\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name="command" string="false">git status</parameter>',
+        '<function=execute_bash>\n<parameter=command>pytest -q</parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+        '<｜｜DSML｜｜ calls>\n<parameter name="command">git diff</parameter>',
+        '<function=execute_bash>\n<parameter=command>git log -1</parameter>\n</｜｜DSML｜｜ parameter>',
+        '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="execute_bash">\n<｜｜DSML｜｜ parameter name="parameter" string="true">git status</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>',
+    ],
+)
+def test_convert_deepseek_dsml_tool_call(content):
+    converted = convert_non_fncall_messages_to_fncall_messages(
+        [{'role': 'assistant', 'content': content}], FNCALL_TOOLS
+    )
+    message = converted[0]
+    assert message['role'] == 'assistant'
+    assert len(message['tool_calls']) == 1
+    call = message['tool_calls'][0]
+    assert call['function']['name'] == 'execute_bash'
+    arguments = json.loads(call['function']['arguments'])
+    assert arguments['command']
+    assert '｜｜DSML｜｜' not in message.get('content', '')
+
+
+def test_ambiguous_deepseek_dsml_is_not_executed():
+    ambiguous_tools = [
+        {
+            'type': 'function',
+            'function': {
+                'name': name,
+                'description': name,
+                'parameters': {
+                    'type': 'object',
+                    'properties': {'value': {'type': 'string'}},
+                    'required': ['value'],
+                },
+            },
+        }
+        for name in ('first', 'second')
+    ]
+    content = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name="value">x</parameter>'
+    converted = convert_non_fncall_messages_to_fncall_messages(
+        [{'role': 'assistant', 'content': content}], ambiguous_tools
+    )
+    assert 'tool_calls' not in converted[0]
+    assert converted[0]['content'] == content

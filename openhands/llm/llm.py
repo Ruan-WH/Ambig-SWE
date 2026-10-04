@@ -101,6 +101,11 @@ class LLM(RetryMixin, DebugMixin):
         self.cost_metric_supported: bool = True
         self.config: LLMConfig = copy.deepcopy(config)
 
+        # LiteLLM prints provider-discovery hints directly to stdout whenever
+        # capability checks encounter an unregistered custom model name. Those
+        # exceptions are handled below, so the repeated hints are only noise.
+        litellm.suppress_debug_info = True
+
         self.model_info: ModelInfo | None = None
 
         if self.config.log_completions:
@@ -186,7 +191,12 @@ class LLM(RetryMixin, DebugMixin):
                     messages, kwargs['tools']
                 )
                 kwargs['messages'] = messages
-                kwargs['stop'] = STOP_WORDS
+                # DeepSeek reasoning models can encounter this stop sequence in
+                # hidden reasoning before emitting visible content, yielding an
+                # empty assistant message. The converter already repairs a
+                # missing closing tag, so omit the stop sequence for DeepSeek.
+                if 'deepseek' not in self.config.model.lower():
+                    kwargs['stop'] = STOP_WORDS
                 mock_fncall_tools = kwargs.pop('tools')
 
             # if we have no messages, something went very wrong

@@ -1,7 +1,9 @@
 import copy
 from unittest.mock import MagicMock, patch
 
+import litellm
 import pytest
+from litellm import ModelResponse
 from litellm.exceptions import (
     APIConnectionError,
     InternalServerError,
@@ -35,6 +37,83 @@ def default_config():
         retry_min_wait=1,
         retry_max_wait=2,
     )
+
+
+def test_llm_suppresses_litellm_provider_hints(monkeypatch, capsys):
+    monkeypatch.setattr(litellm, 'suppress_debug_info', False)
+    llm = LLM(
+        LLMConfig(
+            model='openai/deepseek-flash',
+            api_key='test_key',
+            max_input_tokens=4096,
+            max_output_tokens=4096,
+            native_tool_calling=False,
+        )
+    )
+
+    for _ in range(3):
+        assert llm.vision_is_active() is False
+
+    assert litellm.suppress_debug_info is True
+    assert 'Provider List:' not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ('model', 'expected_stop'),
+    [('openai/deepseek-flash', None), ('openai/gpt-4o', ['</function'])],
+)
+def test_mock_function_calling_stop_words(model, expected_stop):
+    llm = LLM(
+        LLMConfig(
+            model=model,
+            api_key='test_key',
+            max_input_tokens=4096,
+            max_output_tokens=4096,
+            native_tool_calling=False,
+        )
+    )
+    llm._completion_unwrapped = MagicMock(
+        return_value=ModelResponse(
+            choices=[
+                {
+                    'index': 0,
+                    'finish_reason': 'stop',
+                    'message': {
+                        'role': 'assistant',
+                        'content': '<function=finish>\n</function>',
+                    },
+                }
+            ]
+        )
+    )
+    tools = [
+        {
+            'type': 'function',
+            'function': {
+                'name': 'finish',
+                'description': 'Finish',
+                'parameters': {'type': 'object', 'properties': {}},
+            },
+        }
+    ]
+
+    with (
+        patch(
+            'openhands.llm.llm.convert_fncall_messages_to_non_fncall_messages',
+            side_effect=lambda messages, tools: messages,
+        ),
+        patch(
+            'openhands.llm.llm.convert_non_fncall_messages_to_fncall_messages',
+            side_effect=lambda messages, tools: messages,
+        ),
+    ):
+        llm.completion(
+            messages=[{'role': 'user', 'content': 'Fix the issue'}],
+            tools=tools,
+            mock_function_calling=True,
+        )
+
+    assert llm._completion_unwrapped.call_args.kwargs.get('stop') == expected_stop
 
 
 def test_llm_init_with_default_config(default_config):

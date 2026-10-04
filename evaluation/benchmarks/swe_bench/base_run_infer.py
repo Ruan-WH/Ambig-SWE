@@ -38,7 +38,7 @@ from openhands.utils.shutdown_listener import sleep_if_should_continue
 
 USE_HINT_TEXT = os.environ.get('USE_HINT_TEXT', 'false').lower() == 'true'
 USE_INSTANCE_IMAGE = os.environ.get('USE_INSTANCE_IMAGE', 'false').lower() == 'true'
-RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'false'
+RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
 
 client = openai.OpenAI(
     api_key=os.environ['API_KEY'],
@@ -186,6 +186,9 @@ def get_config(
             use_host_network=False,
             runtime_extra_build_args=json.loads(
                 os.environ.get('RUNTIME_EXTRA_BUILD_ARGS', 'null')
+            ),
+            docker_runtime_kwargs=json.loads(
+                os.environ.get('DOCKER_RUNTIME_KWARGS', 'null')
             ),
             # large enough timeout, since some testcases take very long to run
             timeout=300,

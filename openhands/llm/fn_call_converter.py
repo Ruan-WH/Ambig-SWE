@@ -230,6 +230,21 @@ PLEASE follow the format strictly! PLEASE EMIT ONE AND ONLY ONE FUNCTION CALL PE
 FN_REGEX_PATTERN = r'<function=([^>]+)>\n(.*?)</function>'
 FN_PARAM_REGEX_PATTERN = r'<parameter=([^>]+)>(.*?)</parameter>'
 
+
+# DeepSeek models may emit their internal DSML representation even when the
+# prompt asks for the XML-like mock function-calling format above. Keep this
+# handling in the mock converter so the agent always sees canonical calls.
+DSML_MARKER = '｜｜DSML｜｜'
+DSML_INVOKE_REGEX_PATTERN = (
+    rf'<{DSML_MARKER}\s+invoke\s+name=["\']([^"\']+)["\'][^>]*>'
+)
+DSML_PARAM_REGEX_PATTERN = rf'''(?:
+    <parameter=([^>]+)> |
+    <parameter\s+name=["']([^"']+)["'][^>]*> |
+    <{DSML_MARKER}\s+parameter\s+name=["']([^"']+)["'][^>]*>
+)(.*?)
+(?:</parameter>|</{DSML_MARKER}\s+parameter>)'''
+
 # Add new regex pattern for tool execution results
 TOOL_RESULT_REGEX_PATTERN = r'EXECUTION RESULT of \[(.*?)\]:\n(.*)'
 
@@ -559,6 +574,94 @@ def _fix_stopword(content: str) -> str:
     return content
 
 
+def _normalize_deepseek_dsml(
+    content: str, tools: list[ChatCompletionToolParam]
+) -> str:
+    """Normalize a DeepSeek DSML tool call to the mock function-call format.
+
+    Observed responses can mix ``<function=...>`` with DSML closing tags, or
+    omit the ``invoke`` tag while retaining uniquely identifying parameters.
+    Ambiguous calls remain untouched so ordinary text cannot execute a tool.
+    """
+    if DSML_MARKER not in content:
+        return content
+
+    param_matches = list(
+        re.finditer(DSML_PARAM_REGEX_PATTERN, content, re.DOTALL | re.VERBOSE)
+    )
+    if not param_matches:
+        return content
+
+    invoke_match = re.search(DSML_INVOKE_REGEX_PATTERN, content)
+    function_match = re.search(r'<function=([^>]+)>', content)
+    fn_name = (
+        invoke_match.group(1)
+        if invoke_match
+        else function_match.group(1)
+        if function_match
+        else None
+    )
+
+    params = [
+        [
+            next(group for group in match.groups()[:3] if group is not None),
+            match.group(4).strip(),
+        ]
+        for match in param_matches
+    ]
+    param_names = {name for name, _ in params}
+    if fn_name is None:
+        candidates = []
+        for tool in tools:
+            function = tool['function']
+            schema = function.get('parameters', {})
+            allowed = set(schema.get('properties', {}))
+            required = set(schema.get('required', []))
+            if required.issubset(param_names) and param_names.issubset(allowed):
+                candidates.append(function['name'])
+        if len(candidates) != 1:
+            return content
+        fn_name = candidates[0]
+
+    matching_tool = next(
+        (
+            tool['function']
+            for tool in tools
+            if tool['type'] == 'function' and tool['function']['name'] == fn_name
+        ),
+        None,
+    )
+    if matching_tool is None:
+        return content
+
+    # DeepSeek has also emitted ``name="parameter"`` for execute_bash. Repair
+    # this only for an explicitly named, single-argument tool; inferring names
+    # for a multi-argument tool could execute a materially different request.
+    schema = matching_tool.get('parameters', {})
+    allowed = set(schema.get('properties', {}))
+    required = set(schema.get('required', []))
+    if len(params) == 1 and len(allowed) == 1 and required == allowed:
+        params[0][0] = next(iter(allowed))
+
+    marker_positions = [
+        position
+        for position in (
+            content.find(f'<{DSML_MARKER}'),
+            content.find('<function='),
+            content.find('<parameter='),
+            content.find('<parameter name='),
+        )
+        if position >= 0
+    ]
+    prefix = content[: min(marker_positions)].rstrip() if marker_positions else ''
+    canonical = [f'<function={fn_name}>']
+    for name, value in params:
+        canonical.append(f'<parameter={name}>{value}</parameter>')
+    canonical.append('</function>')
+    tool_call = '\n'.join(canonical)
+    return f'{prefix}\n\n{tool_call}'.lstrip() if prefix else tool_call
+
+
 def convert_non_fncall_messages_to_fncall_messages(
     messages: list[dict],
     tools: list[ChatCompletionToolParam],
@@ -667,10 +770,14 @@ def convert_non_fncall_messages_to_fncall_messages(
         # Handle assistant messages
         elif role == 'assistant':
             if isinstance(content, str):
+                content = _normalize_deepseek_dsml(content, tools)
                 content = _fix_stopword(content)
                 fn_match = re.search(FN_REGEX_PATTERN, content, re.DOTALL)
             elif isinstance(content, list):
                 if content and content[-1]['type'] == 'text':
+                    content[-1]['text'] = _normalize_deepseek_dsml(
+                        content[-1]['text'], tools
+                    )
                     content[-1]['text'] = _fix_stopword(content[-1]['text'])
                     fn_match = re.search(
                         FN_REGEX_PATTERN, content[-1]['text'], re.DOTALL
