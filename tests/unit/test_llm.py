@@ -563,3 +563,30 @@ def test_get_token_count_error_handling(
     mock_logger.error.assert_called_once_with(
         'Error getting token count for\n model gpt-4o\nToken counting failed'
     )
+
+
+def test_failed_mock_conversion_preserves_raw_reply_and_accounts_usage(tmp_path):
+    import json
+    from openhands.core.exceptions import FunctionCallConversionError
+    from openhands.agenthub.codeact_agent.function_calling import get_tools
+
+    llm = LLM(LLMConfig(
+        model='openai/deepseek-flash', api_key='test_key', native_tool_calling=False,
+        max_input_tokens=4096, max_output_tokens=4096,
+        log_completions=True, log_completions_folder=str(tmp_path),
+    ))
+    raw = '<function=execute_bash><parameter=command>pwd'
+    llm._completion_unwrapped = MagicMock(return_value=ModelResponse(
+        choices=[{'message': {'role': 'assistant', 'content': raw}}],
+    ))
+    llm._post_completion = MagicMock(return_value=0.01)
+    with pytest.raises(FunctionCallConversionError):
+        llm.completion(messages=[{'role': 'user', 'content': 'Inspect the workspace'}], tools=get_tools(), mock_function_calling=True)
+    llm._post_completion.assert_called_once()
+    files = list(tmp_path.glob('conversion-error-*.json'))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert data['response']['choices'][0]['message']['content'] == raw
+    assert data['conversion_error']['type'] == 'FunctionCallConversionError'
+    assert data['cost'] == 0.01
+    assert 'test_key' not in files[0].read_text()

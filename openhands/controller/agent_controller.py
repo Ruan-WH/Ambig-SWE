@@ -16,6 +16,7 @@ from openhands.controller.state.state import State, TrafficControlState
 from openhands.controller.stuck import StuckDetector
 from openhands.core.config import AgentConfig, LLMConfig
 from openhands.core.exceptions import (
+    FunctionCallConversionError,
     AgentStuckInLoopError,
     FunctionCallNotExistsError,
     FunctionCallValidationError,
@@ -649,6 +650,7 @@ class AgentController:
             LLMMalformedActionError,
             LLMNoActionError,
             LLMResponseError,
+            FunctionCallConversionError,
             FunctionCallValidationError,
             FunctionCallNotExistsError,
         ) as e:

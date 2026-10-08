@@ -227,7 +227,7 @@ PLEASE follow the format strictly! PLEASE EMIT ONE AND ONLY ONE FUNCTION CALL PE
 """
 
 # Regex patterns for function call parsing
-FN_REGEX_PATTERN = r'<function=([^>]+)>\n(.*?)</function>'
+FN_REGEX_PATTERN = r"<function=([^>]+)>\s*(.*)</function>"
 FN_PARAM_REGEX_PATTERN = r'<parameter=([^>]+)>(.*?)</parameter>'
 
 
@@ -512,13 +512,21 @@ def _extract_and_validate_params(
     found_params = set()
     for param_match in param_matches:
         param_name = param_match.group(1)
-        param_value = param_match.group(2).strip()
+        param_value = param_match.group(2)
+        if fn_name != 'str_replace_editor' or param_name not in {
+            'old_str', 'new_str', 'file_text'
+        }:
+            param_value = param_value.strip()
+        if param_name in found_params:
+            raise FunctionCallValidationError(
+                f"Duplicate parameter '{param_name}' for function '{fn_name}'."
+            )
 
         # Validate parameter is allowed
-        if allowed_params and param_name not in allowed_params:
+        if param_name not in allowed_params:
             raise FunctionCallValidationError(
                 f"Parameter '{param_name}' is not allowed for function '{fn_name}'. "
-                f'Allowed parameters: {allowed_params}'
+                f"Allowed parameters: {allowed_params}"
             )
 
         # Validate and convert parameter type
@@ -535,6 +543,10 @@ def _extract_and_validate_params(
                 try:
                     param_value = json.loads(param_value)
                 except json.JSONDecodeError:
+                    raise FunctionCallValidationError(
+                        f"Parameter '{param_name}' is expected to be an array."
+                    )
+                if not isinstance(param_value, list):
                     raise FunctionCallValidationError(
                         f"Parameter '{param_name}' is expected to be an array."
                     )
@@ -574,23 +586,47 @@ def _fix_stopword(content: str) -> str:
     return content
 
 
-def _normalize_deepseek_dsml(
-    content: str, tools: list[ChatCompletionToolParam]
-) -> str:
+def _normalize_deepseek_dsml(content: str, tools: list[ChatCompletionToolParam]) -> str:
     """Normalize a DeepSeek DSML tool call to the mock function-call format.
 
     Observed responses can mix ``<function=...>`` with DSML closing tags, or
     omit the ``invoke`` tag while retaining uniquely identifying parameters.
-    Ambiguous calls remain untouched so ordinary text cannot execute a tool.
+    Ambiguous tool envelopes are rejected; ordinary parameter examples stay inert.
     """
-    if DSML_MARKER not in content:
+    if not re.search(r"<(?:function=|parameter[=\s]|" + DSML_MARKER + r")", content):
         return content
 
+    # DeepSeek sometimes uses a parameter tag as the invocation wrapper. Only
+    # accept a registered tool name; never treat an arbitrary parameter as a tool.
+    tool_names = {tool["function"]["name"] for tool in tools}
+    value_spans = [
+        match.span(4)
+        for match in re.finditer(
+            DSML_PARAM_REGEX_PATTERN, content, re.DOTALL | re.VERBOSE
+        )
+    ]
+    content = re.sub(
+        r"<parameter=([^>]+)>",
+        lambda match: (
+            f"<function={match.group(1).strip(chr(34) + chr(39))}>"
+            if match.group(1).strip(chr(34) + chr(39)) in tool_names
+            and not any(start <= match.start() < end for start, end in value_spans)
+            else match.group(0)
+        ),
+        content,
+    )
     param_matches = list(
         re.finditer(DSML_PARAM_REGEX_PATTERN, content, re.DOTALL | re.VERBOSE)
     )
-    if not param_matches:
-        return content
+    value_spans = [match.span(4) for match in param_matches]
+    invocations = [
+        match
+        for pattern in (DSML_INVOKE_REGEX_PATTERN, r"<function=([^>]+)>")
+        for match in re.finditer(pattern, content)
+        if not any(start <= match.start() < end for start, end in value_spans)
+    ]
+    if len(invocations) > 1:
+        raise FunctionCallConversionError("Expected one tool invocation per reply.")
 
     invoke_match = re.search(DSML_INVOKE_REGEX_PATTERN, content)
     function_match = re.search(r'<function=([^>]+)>', content)
@@ -601,14 +637,51 @@ def _normalize_deepseek_dsml(
         if function_match
         else None
     )
+    if fn_name is not None:
+        fn_name = fn_name.strip().strip("\"'")
+
+    # Missing final parameter delimiters indicate truncation, not an ordinary
+    # assistant message. Retrying is safer than executing a partial shell command.
+    parameter_openings = [
+        match
+        for match in re.finditer(
+            rf"<(?:parameter[=\s]|{DSML_MARKER}\s+parameter\s)[^>]*>", content
+        )
+        if not any(start <= match.start() < end for start, end in value_spans)
+    ]
+    if len(parameter_openings) != len(param_matches):
+        raise FunctionCallConversionError("Incomplete or nested tool parameters.")
+    # A closing delimiter inside a value makes this unescaped protocol
+    # ambiguous. Never silently execute the prefix before that delimiter.
+    matched_closings = {match.end() for match in param_matches}
+    if any(
+        match.end() not in matched_closings
+        for match in re.finditer(r'</parameter>', content)
+    ):
+        raise FunctionCallConversionError('Ambiguous parameter closing delimiter in tool input.')
+    if not param_matches:
+        if invoke_match and fn_name in tool_names:
+            marker_start = content.find(f'<{DSML_MARKER}')
+            return content[:marker_start] + f'<function={fn_name}>\n</function>'
+        if invoke_match or DSML_MARKER in content:
+            raise FunctionCallConversionError('Unrecognized or incomplete DSML invocation.')
+        if function_match and fn_name in tool_names:
+            return (
+                content[: function_match.start()]
+                + f"<function={fn_name}>"
+                + content[function_match.end() :]
+            )
+        return content
 
     params = [
         [
             next(group for group in match.groups()[:3] if group is not None),
-            match.group(4).strip(),
+            match.group(4),
         ]
         for match in param_matches
     ]
+    for param in params:
+        param[0] = param[0].strip().strip("\"'")
     param_names = {name for name, _ in params}
     if fn_name is None:
         candidates = []
@@ -620,6 +693,12 @@ def _normalize_deepseek_dsml(
             if required.issubset(param_names) and param_names.issubset(allowed):
                 candidates.append(function['name'])
         if len(candidates) != 1:
+            if DSML_MARKER in content or '</function>' in content:
+                raise FunctionCallConversionError('Cannot uniquely identify the tool invocation.')
+            return content
+        # Bare parameter tags only count as an invocation when a tool envelope
+        # remains. This keeps prose/examples containing parameter tags inert.
+        if DSML_MARKER not in content and "</function>" not in content:
             return content
         fn_name = candidates[0]
 
@@ -632,6 +711,8 @@ def _normalize_deepseek_dsml(
         None,
     )
     if matching_tool is None:
+        if invoke_match:
+            raise FunctionCallValidationError(f"Unknown DSML function '{fn_name}'.")
         return content
 
     # DeepSeek has also emitted ``name="parameter"`` for execute_bash. Repair
@@ -640,13 +721,18 @@ def _normalize_deepseek_dsml(
     schema = matching_tool.get('parameters', {})
     allowed = set(schema.get('properties', {}))
     required = set(schema.get('required', []))
-    if len(params) == 1 and len(allowed) == 1 and required == allowed:
+    if (
+        len(params) == 1
+        and params[0][0] == "parameter"
+        and len(allowed) == 1
+        and required == allowed
+    ):
         params[0][0] = next(iter(allowed))
 
     marker_positions = [
         position
         for position in (
-            content.find(f'<{DSML_MARKER}'),
+            content.find(f"<{DSML_MARKER}"),
             content.find('<function='),
             content.find('<parameter='),
             content.find('<parameter name='),
@@ -654,12 +740,12 @@ def _normalize_deepseek_dsml(
         if position >= 0
     ]
     prefix = content[: min(marker_positions)].rstrip() if marker_positions else ''
-    canonical = [f'<function={fn_name}>']
+    canonical = [f"<function={fn_name}>"]
     for name, value in params:
-        canonical.append(f'<parameter={name}>{value}</parameter>')
+        canonical.append(f"<parameter={name}>{value}</parameter>")
     canonical.append('</function>')
     tool_call = '\n'.join(canonical)
-    return f'{prefix}\n\n{tool_call}'.lstrip() if prefix else tool_call
+    return f"{prefix}\n\n{tool_call}".lstrip() if prefix else tool_call
 
 
 def convert_non_fncall_messages_to_fncall_messages(

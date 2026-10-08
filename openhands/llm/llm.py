@@ -27,7 +27,11 @@ from litellm.exceptions import (
 from litellm.types.utils import CostPerToken, ModelResponse, Usage
 from litellm.utils import create_pretrained_tokenizer
 
-from openhands.core.exceptions import CloudFlareBlockageError
+from openhands.core.exceptions import (
+    CloudFlareBlockageError,
+    FunctionCallConversionError,
+    FunctionCallValidationError,
+)
 from openhands.core.logger import openhands_logger as logger
 from openhands.core.message import Message
 from openhands.llm.debug_mixin import DebugMixin
@@ -237,11 +241,30 @@ class LLM(RetryMixin, DebugMixin):
                     assert len(resp.choices) == 1
                     assert mock_fncall_tools is not None
                     non_fncall_response_message = resp.choices[0].message
-                    fn_call_messages_with_response = (
-                        convert_non_fncall_messages_to_fncall_messages(
+                    try:
+                        fn_call_messages_with_response = convert_non_fncall_messages_to_fncall_messages(
                             messages + [non_fncall_response_message], mock_fncall_tools
                         )
-                    )
+                    except (FunctionCallConversionError, FunctionCallValidationError) as error:
+                        cost = self._post_completion(non_fncall_response)
+                        if self.config.log_completions:
+                            assert self.config.log_completions_folder is not None
+                            log_file = os.path.join(
+                                self.config.log_completions_folder,
+                                f'conversion-error-{time.time_ns()}.json',
+                            )
+                            with open(log_file, 'w') as f:
+                                f.write(json.dumps({
+                                    'messages': messages,
+                                    'response': non_fncall_response,
+                                    'timestamp': time.time(),
+                                    'cost': cost,
+                                    'conversion_error': {
+                                        'type': type(error).__name__,
+                                        'message': str(error),
+                                    },
+                                }))
+                        raise
                     fn_call_response_message = fn_call_messages_with_response[-1]
                     if not isinstance(fn_call_response_message, LiteLLMMessage):
                         fn_call_response_message = LiteLLMMessage(

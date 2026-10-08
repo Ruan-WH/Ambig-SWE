@@ -4,6 +4,7 @@ import copy
 import json
 
 import pytest
+from openhands.core.exceptions import FunctionCallValidationError
 from litellm import ChatCompletionToolParam
 
 from openhands.llm.fn_call_converter import (
@@ -728,8 +729,126 @@ def test_ambiguous_deepseek_dsml_is_not_executed():
         for name in ('first', 'second')
     ]
     content = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name="value">x</parameter>'
-    converted = convert_non_fncall_messages_to_fncall_messages(
-        [{'role': 'assistant', 'content': content}], ambiguous_tools
-    )
-    assert 'tool_calls' not in converted[0]
-    assert converted[0]['content'] == content
+    with pytest.raises(FunctionCallConversionError):
+        convert_non_fncall_messages_to_fncall_messages(
+            [{'role': 'assistant', 'content': content}], ambiguous_tools
+        )
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "<parameter=execute_bash>",
+        '<function=execute_bash">',
+        '<function="execute_bash">',
+        "",
+    ],
+)
+def test_deepseek_malformed_envelope_preserves_command(wrapper):
+    from litellm import ModelResponse
+    from openhands.agenthub.codeact_agent.function_calling import response_to_actions
+    from openhands.events.action import CmdRunAction
+
+    command = "cd /workspace && python - <<'PY'\nprint('hello')\nPY"
+    content = f"Inspecting files.\n{wrapper}<parameter=command>{command}</parameter></function>"
+    message = convert_non_fncall_messages_to_fncall_messages(
+        [{"role": "assistant", "content": content}], FNCALL_TOOLS
+    )[0]
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {
+        "command": command
+    }
+    response = ModelResponse(choices=[{"message": message}])
+    action = response_to_actions(response)[0]
+    assert isinstance(action, CmdRunAction)
+    assert action.command == command
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "<function=execute_bash><parameter=command>pwd",
+        '<｜｜DSML｜｜ invoke name="execute_bash"><｜｜DSML｜｜ parameter name="command">pwd',
+        "<function=execute_bash><parameter=command>pwd</parameter><parameter=command>ls</parameter></function>",
+        "<function=execute_bash><parameter=wrong>pwd</parameter></function>",
+        "<function=execute_bash><parameter=command>pwd</parameter></function><function=execute_bash><parameter=command>ls</parameter></function>",
+    ],
+)
+def test_deepseek_invalid_calls_are_rejected(content):
+    with pytest.raises((FunctionCallConversionError, FunctionCallValidationError)):
+        convert_non_fncall_messages_to_fncall_messages(
+            [{"role": "assistant", "content": content}], FNCALL_TOOLS
+        )
+
+
+def test_bare_parameter_example_does_not_execute():
+    content = "Example: <parameter=command>pwd</parameter>"
+    message = convert_non_fncall_messages_to_fncall_messages(
+        [{"role": "assistant", "content": content}], FNCALL_TOOLS
+    )[0]
+    assert message['content'] == content
+    assert not message.get("tool_calls")
+
+
+@pytest.mark.parametrize('command', [
+    "printf '%s' '<function=finish>'",
+    "printf '%s' '</function>'",
+    "printf '%s' '<parameter=execute_bash>'",
+])
+def test_protocol_literals_in_shell_command_are_preserved(command):
+    content = f'<function=execute_bash><parameter=command>{command}</parameter></function>'
+    message = convert_non_fncall_messages_to_fncall_messages(
+        [{'role': 'assistant', 'content': content}], FNCALL_TOOLS
+    )[0]
+    assert json.loads(message['tool_calls'][0]['function']['arguments']) == {'command': command}
+
+
+def test_deepseek_dsml_finish_without_arguments():
+    content = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="finish"></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
+    message = convert_non_fncall_messages_to_fncall_messages(
+        [{'role': 'assistant', 'content': content}], FNCALL_TOOLS
+    )[0]
+    assert message['tool_calls'][0]['function']['name'] == 'finish'
+    assert json.loads(message['tool_calls'][0]['function']['arguments']) == {}
+    assert '｜｜DSML｜｜' not in message.get('content', '')
+
+
+def test_deepseek_editor_parameters_preserve_indentation_and_types():
+    from openhands.agenthub.codeact_agent.function_calling import get_tools
+
+    values = {'command': 'str_replace', 'path': '/workspace/example.py',
+              'old_str': '    return old_value', 'new_str': '    return new_value',
+              'view_range': '[1, 12]'}
+    content = '<｜｜DSML｜｜ invoke name="str_replace_editor">' + ''.join(
+        f'<｜｜DSML｜｜ parameter name="{name}">{value}</｜｜DSML｜｜ parameter>'
+        for name, value in values.items()
+    ) + '</｜｜DSML｜｜ invoke>'
+    message = convert_non_fncall_messages_to_fncall_messages(
+        [{'role': 'assistant', 'content': content}], get_tools(codeact_enable_llm_editor=False)
+    )[0]
+    args = json.loads(message['tool_calls'][0]['function']['arguments'])
+    assert args['old_str'] == values['old_str']
+    assert args['new_str'] == values['new_str']
+    assert args['view_range'] == [1, 12]
+
+
+@pytest.mark.parametrize('command', [
+    "printf '%s' '</parameter>'",
+    "printf '%s' '<parameter=command>x</parameter>'",
+])
+def test_ambiguous_parameter_delimiters_never_execute_truncated_command(command):
+    content = f'<function=execute_bash><parameter=command>{command}</parameter></function>'
+    with pytest.raises(FunctionCallConversionError):
+        convert_non_fncall_messages_to_fncall_messages(
+            [{'role': 'assistant', 'content': content}], FNCALL_TOOLS
+        )
+
+
+@pytest.mark.parametrize('content', [
+    '<function=finish><parameter=unknown>x</parameter></function>',
+    '<function=str_replace_editor><parameter=command>view</parameter><parameter=path>/workspace/a.py</parameter><parameter=view_range>{"start":1}</parameter></function>',
+])
+def test_invalid_schema_arguments_return_validation_feedback(content):
+    with pytest.raises(FunctionCallValidationError):
+        convert_non_fncall_messages_to_fncall_messages(
+            [{'role': 'assistant', 'content': content}], FNCALL_TOOLS
+        )

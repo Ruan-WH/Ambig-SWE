@@ -132,7 +132,8 @@ async def test_react_to_exception(mock_agent, mock_event_stream, mock_status_cal
 @pytest.mark.asyncio
 async def test_run_controller_with_fatal_error():
     config = AppConfig()
-    file_store = get_file_store(config.file_store, config.file_store_path)
+    # Repeated runs must not reuse events left by a previous test process.
+    file_store = InMemoryFileStore({})
     event_stream = EventStream(sid='test', file_store=file_store)
 
     agent = MagicMock(spec=Agent)
@@ -552,3 +553,30 @@ async def test_run_controller_max_iterations_has_metrics():
     assert (
         state.metrics.accumulated_cost == 10.0 * 3
     ), f'Expected accumulated cost to be 30.0, but got {state.metrics.accumulated_cost}'
+
+
+@pytest.mark.asyncio
+async def test_conversion_failure_returns_feedback_and_allows_retry(mock_agent, mock_event_stream):
+    from openhands.core.exceptions import FunctionCallConversionError
+
+    controller = AgentController(
+        agent=mock_agent, event_stream=mock_event_stream, max_iterations=10,
+        sid='conversion-retry', confirmation_mode=False, headless_mode=True,
+    )
+    controller.state.agent_state = AgentState.RUNNING
+    mock_agent.step.side_effect = [
+        FunctionCallConversionError('Incomplete tool parameters'),
+        CmdRunAction(command='pwd'),
+    ]
+    try:
+        await controller._step()
+        feedback = mock_event_stream.add_event.call_args.args[0]
+        assert isinstance(feedback, ErrorObservation)
+        assert 'Incomplete tool parameters' in feedback.content
+        assert controller.state.agent_state == AgentState.RUNNING
+        await controller._step()
+        action = mock_event_stream.add_event.call_args.args[0]
+        assert isinstance(action, CmdRunAction)
+        assert action.command == 'pwd'
+    finally:
+        await controller.close()
