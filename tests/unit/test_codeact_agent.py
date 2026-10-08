@@ -18,7 +18,7 @@ from openhands.agenthub.codeact_agent.function_calling import (
 )
 from openhands.controller.state.state import State
 from openhands.core.config import AgentConfig, LLMConfig
-from openhands.core.exceptions import FunctionCallNotExistsError
+from openhands.core.exceptions import FunctionCallNotExistsError, LLMNoActionError
 from openhands.core.message import ImageContent, TextContent
 from openhands.events.action import (
     AgentFinishAction,
@@ -490,6 +490,24 @@ def test_response_to_actions_invalid_tool():
 
     with pytest.raises(FunctionCallNotExistsError):
         response_to_actions(mock_response)
+
+
+@pytest.mark.parametrize('content', [None, '', '  \n'])
+def test_response_to_actions_empty_reply_is_not_user_question(content):
+    response = Mock()
+    response.choices = [Mock(message=Mock(content=content, tool_calls=[]))]
+
+    with pytest.raises(LLMNoActionError, match='no visible content or tool call'):
+        response_to_actions(response)
+
+
+def test_response_to_actions_text_reply_still_waits_for_user():
+    response = Mock()
+    response.choices = [Mock(message=Mock(content='Can you clarify?', tool_calls=[]))]
+
+    action = response_to_actions(response)[0]
+    assert isinstance(action, MessageAction)
+    assert action.wait_for_response
 
 
 def test_step_with_no_pending_actions(mock_state: State):

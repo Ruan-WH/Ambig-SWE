@@ -1,0 +1,18 @@
+{
+  "_comment": "Upstream commit whose own diff contains the gold modification, used by scripts/setup/seal_gold_history.sh as a spot-check that sealing removed the fix commit. Only mappings confirmed against a real instance image are listed here.",
+  "_policy": "A configured sha that is absent before sealing fails the instance closed, so an unverified mapping can abort a whole run. Add entries only after `bash evaluation/benchmarks/swe_bench/scripts/audit/verify_fix_mappings.sh <dataset-json>` reports OK for them. Candidate shas recovered from trajectories are in evaluation/evaluation_outputs/analysis_artifacts/fix-commit-candidates.json.",
+  "_verified": {
+    "astropy__astropy-13033": "xingyaoww/sweb.eval.x86_64.astropy_s_astropy-13033:latest",
+    "astropy__astropy-13579": "xingyaoww/sweb.eval.x86_64.astropy_s_astropy-13579:latest",
+    "astropy__astropy-13977": "xingyaoww/sweb.eval.x86_64.astropy_s_astropy-13977:latest",
+    "astropy__astropy-14182": "xingyaoww/sweb.eval.x86_64.astropy_s_astropy-14182:latest",
+    "astropy__astropy-14365": "xingyaoww/sweb.eval.x86_64.astropy_s_astropy-14365:latest"
+  },
+  "commits": {
+    "astropy__astropy-13033": "dbc77e57c4c0adc7c86eaceeb22e7f0ac8621569",
+    "astropy__astropy-13579": "4f4c1a3c53ddfb67e5531651a16764e5a38b9dcf",
+    "astropy__astropy-13977": "f3389c1b23e09cf512a0edd34b89ab90210a21e5",
+    "astropy__astropy-14182": "193f3123b0ddb5a20dfb30cca19c52259844df3a",
+    "astropy__astropy-14365": "ba74c89a4ccb3d118059691aa5abb753f14317ac"
+  }
+}

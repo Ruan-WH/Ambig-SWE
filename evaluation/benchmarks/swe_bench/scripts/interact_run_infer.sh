@@ -2,6 +2,7 @@
 set -eo pipefail
 
 source "evaluation/utils/version_control.sh"
+source "evaluation/benchmarks/swe_bench/scripts/configure_host_proxy.sh"
 
 MODEL_CONFIG=$1
 COMMIT_HASH=$2

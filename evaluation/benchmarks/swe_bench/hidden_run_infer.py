@@ -39,6 +39,33 @@ USE_HINT_TEXT = os.environ.get('USE_HINT_TEXT', 'false').lower() == 'true'
 USE_INSTANCE_IMAGE = os.environ.get('USE_INSTANCE_IMAGE', 'false').lower() == 'true'
 RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
 
+# When enabled, every commit that is not an ancestor of the instance base_commit
+# is removed from /testbed and from the workspace copy, and the instance JSON
+# handed to the container is reduced to the keys its entry script reads. This
+# closes the two gold-patch channels: upstream git history and the dataset
+# record. See scripts/setup/seal_gold_history.sh. Default off so the previous
+# (unsealed) arm stays reproducible.
+SEAL_GOLD_LEAK = os.environ.get('SEAL_GOLD_LEAK', 'false').lower() == 'true'
+# Experimental recovery prompt for models that repeatedly ask for input instead
+# of editing the repository. Keep it opt-in so previous runs stay comparable.
+HIDDEN_AGENT_RECOVERY = os.environ.get('HIDDEN_AGENT_RECOVERY', 'false').lower() == 'true'
+
+_KNOWN_FIX_COMMITS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'known_fix_commits.json'
+)
+
+
+def _known_fix_commit(instance_id: str) -> str:
+    """Upstream commit carrying this instance's gold change, or '-' if unknown."""
+    try:
+        with open(_KNOWN_FIX_COMMITS_PATH) as f:
+            commits = json.load(f).get('commits', {})
+        return commits.get(instance_id) or '-'
+    except (OSError, json.JSONDecodeError):
+        logger.warning(f'Could not read {_KNOWN_FIX_COMMITS_PATH}')
+        return '-'
+
+
 AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
     'CodeActAgent': lambda state: fake_user_response(state),
     'CodeActSWEAgent': lambda state: fake_user_response(state),
@@ -46,6 +73,14 @@ AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
 
 
 def fake_user_response(state: State) -> str:
+    if HIDDEN_AGENT_RECOVERY:
+        return (
+            'Continue with the requested code fix. Use the issue description and '
+            'repository source as your evidence. Do not search for gold patches, '
+            'evaluation files, hidden tests, or task metadata. If the issue is '
+            'ambiguous, make a reasonable minimal change to the source code, '
+            'run a focused check, and finish. Do not ask for more information.'
+        )
     return 'Please continue working on the task.'
 
 
@@ -102,6 +137,14 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
             '<IMPORTANT!>\n'
             'You SHOULD NEVER attempt to browse the web. '
             '</IMPORTANT!>\n'
+        )
+    if HIDDEN_AGENT_RECOVERY:
+        instruction += (
+            f'Work in /workspace/{workspace_dir_name}. Use the issue description '
+            'and source code to make a reasonable minimal fix. Do not search for '
+            'gold patches, hidden tests, evaluation files, or task metadata. '
+            'If details are ambiguous, choose a defensible interpretation, '
+            'edit the source, run a focused check, and finish.\n'
         )
     return instruction
 
@@ -187,9 +230,76 @@ def _get_alt_workspace_dir_name(instance: pd.Series) -> str:
         return s
 
 
+def _seal_evidence_path(
+    metadata: EvalMetadata | None, instance_id: str
+) -> str | None:
+    if metadata is None or not getattr(metadata, 'eval_output_dir', None):
+        return None
+    evidence_dir = os.path.join(metadata.eval_output_dir, 'seal_evidence')
+    os.makedirs(evidence_dir, exist_ok=True)
+    return os.path.join(evidence_dir, f'{instance_id}.json')
+
+
+def _save_seal_evidence(
+    metadata: EvalMetadata | None, instance_id: str, evidence: dict
+) -> None:
+    """Persist probe evidence before any failure path can drop the runtime."""
+    path = _seal_evidence_path(metadata, instance_id)
+    if path is None:
+        logger.warning(
+            'SEAL_GOLD_LEAK is on but there is no eval_output_dir; '
+            'seal evidence was not persisted'
+        )
+        return
+    with open(path, 'w') as f:
+        json.dump(evidence, f, indent=2, ensure_ascii=False)
+    logger.info(f'Wrote seal evidence to {path}')
+
+
+def _run_seal_probe(
+    runtime: Runtime,
+    phase: str,
+    repo: str,
+    base_commit: str,
+    known_fix: str,
+    evidence: dict,
+) -> dict:
+    """Seal one repository and record the probe output. Does not raise."""
+    action = CmdRunAction(
+        command=(
+            f'bash /swe_util/seal_gold_history.sh {phase} {base_commit} '
+            f'{known_fix} {repo}'
+        )
+    )
+    action.timeout = 900
+    logger.info(action, extra={'msg_type': 'ACTION'})
+    obs = runtime.run_action(action)
+    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+    content = obs.content or ''
+    reports = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith('SEAL_EVIDENCE '):
+            try:
+                reports.append(json.loads(line[len('SEAL_EVIDENCE ') :]))
+            except json.JSONDecodeError:
+                reports.append({'parse_error': line})
+    entry = {
+        'phase': phase,
+        'repo': repo,
+        'exit_code': obs.exit_code,
+        'seal_ok': obs.exit_code == 0 and 'SEAL_OK' in content,
+        'reports': reports,
+        'output_tail': content[-4000:],
+    }
+    evidence.setdefault('probes', []).append(entry)
+    return entry
+
+
 def initialize_runtime(
     runtime: Runtime,
     instance: pd.Series,  # this argument is not required
+    metadata: EvalMetadata | None = None,
 ):
     """Initialize the runtime for the agent.
 
@@ -200,6 +310,24 @@ def initialize_runtime(
     logger.info('-' * 30)
     workspace_dir_name = _get_swebench_workspace_dir_name(instance)
     obs: CmdOutputObservation
+
+    instance_id = str(instance['instance_id'])
+    base_commit = str(instance['base_commit'])
+    known_fix = _known_fix_commit(instance_id) if SEAL_GOLD_LEAK else '-'
+    seal_evidence: dict[str, Any] = {
+        'instance_id': instance_id,
+        'seal_gold_leak': SEAL_GOLD_LEAK,
+        'base_commit': base_commit,
+        'known_fix_commit': known_fix,
+        'use_instance_image': USE_INSTANCE_IMAGE,
+        'probes': [],
+        'ok': None,
+    }
+    if SEAL_GOLD_LEAK and not USE_INSTANCE_IMAGE:
+        raise RuntimeError(
+            'SEAL_GOLD_LEAK requires USE_INSTANCE_IMAGE=true: without the '
+            'instance image there is no /testbed copy to seal'
+        )
 
     # Set instance id
     action = CmdRunAction(
@@ -244,7 +372,20 @@ def initialize_runtime(
             temp_file_path = os.path.join(temp_dir, swe_instance_json_name)
             # Write to the file with the desired name within the temporary directory
             with open(temp_file_path, 'w') as f:
-                if not isinstance(instance, dict):
+                if SEAL_GOLD_LEAK:
+                    # Only the keys instance_swe_entry.sh reads. The gold patch,
+                    # the test patch and the issue text must not reach the agent.
+                    json.dump(
+                        [
+                            {
+                                'instance_id': instance_id,
+                                'repo': str(instance['repo']),
+                                'version': str(instance['version']),
+                            }
+                        ],
+                        f,
+                    )
+                elif not isinstance(instance, dict):
                     json.dump([instance.to_dict()], f)
                 else:
                     json.dump([instance], f)
@@ -257,6 +398,66 @@ def initialize_runtime(
             str(os.path.join(script_dir, 'scripts/setup/instance_swe_entry.sh')),
             '/swe_util/',
         )
+
+        if SEAL_GOLD_LEAK:
+            runtime.copy_to(
+                str(
+                    os.path.join(
+                        script_dir, 'scripts/setup/seal_gold_history.sh'
+                    )
+                ),
+                '/swe_util/',
+            )
+
+            # The entry script only needs instance_id/repo/version; prove the
+            # sanitized JSON really contains nothing else. The marker keeps this
+            # robust against a prompt suffix appended to the observation.
+            action = CmdRunAction(
+                command=(
+                    'jq -r \'"JSONKEYS:" + (.[0] | keys_unsorted | sort | join(","))\' '
+                    '/swe_util/eval_data/instances/swe-bench-instance.json'
+                )
+            )
+            action.timeout = 120
+            logger.info(action, extra={'msg_type': 'ACTION'})
+            obs = runtime.run_action(action)
+            logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+            json_keys = next(
+                (
+                    line.strip()[len('JSONKEYS:') :]
+                    for line in (obs.content or '').splitlines()
+                    if line.strip().startswith('JSONKEYS:')
+                ),
+                None,
+            )
+            seal_evidence['instance_json_keys'] = json_keys
+            if obs.exit_code != 0 or json_keys != 'instance_id,repo,version':
+                seal_evidence['ok'] = False
+                _save_seal_evidence(metadata, instance_id, seal_evidence)
+                raise RuntimeError(
+                    'Sanitized instance JSON has unexpected keys: '
+                    f'{json_keys!r} (expected instance_id,repo,version)'
+                )
+
+            # Seal /testbed before instance_swe_entry.sh copies it into
+            # /workspace, so the copy inherits the sealed history.
+            entry = _run_seal_probe(
+                runtime,
+                'testbed',
+                '/testbed',
+                base_commit,
+                known_fix,
+                seal_evidence,
+            )
+            if not entry['seal_ok']:
+                seal_evidence['ok'] = False
+                _save_seal_evidence(metadata, instance_id, seal_evidence)
+                raise RuntimeError(
+                    f'Gold seal failed on /testbed for {instance_id}. '
+                    'Refusing to run the agent against a leaky environment. '
+                    f'Probe tail:\n{entry["output_tail"][-1500:]}'
+                )
+
         action = CmdRunAction(command='cat ~/.bashrc')
         action.timeout = 600
         logger.info(action, extra={'msg_type': 'ACTION'})
@@ -277,6 +478,26 @@ def initialize_runtime(
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
         assert obs.exit_code == 0
+
+        if SEAL_GOLD_LEAK:
+            # Structural probes only: this is a copy of the already-sealed
+            # /testbed, so the known-fix spot-check by construction cannot pass
+            # here. The confirmation comes from the testbed phase above.
+            entry = _run_seal_probe(
+                runtime,
+                'workspace',
+                f'/workspace/{workspace_dir_name}',
+                base_commit,
+                '-',
+                seal_evidence,
+            )
+            if not entry['seal_ok']:
+                seal_evidence['ok'] = False
+                _save_seal_evidence(metadata, instance_id, seal_evidence)
+                raise RuntimeError(
+                    f'Gold seal failed on the workspace copy for {instance_id}. '
+                    f'Probe tail:\n{entry["output_tail"][-1500:]}'
+                )
     else:
         action = CmdRunAction(command='source /swe_util/swe_entry.sh')
         action.timeout = 1800
@@ -322,6 +543,12 @@ def initialize_runtime(
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
     assert obs.exit_code == 0
+
+    if SEAL_GOLD_LEAK:
+        seal_evidence['ok'] = all(
+            probe['seal_ok'] for probe in seal_evidence['probes']
+        )
+        _save_seal_evidence(metadata, instance_id, seal_evidence)
 
     logger.info('-' * 30)
     logger.info('END Runtime Initialization Fn')
@@ -430,7 +657,7 @@ def process_instance(
     call_async_from_sync(runtime.connect)
 
     try:
-        initialize_runtime(runtime, instance)
+        initialize_runtime(runtime, instance, metadata)
 
         instruction = get_instruction(instance, metadata)
         # Here's how you can run the agent (similar to the `main` function) and get the final task state
@@ -549,7 +776,16 @@ if __name__ == '__main__':
     if llm_config is None:
         raise ValueError(f'Could not find LLM config: --llm_config {args.llm_config}')
 
-    details = {}
+    # Record the environment switches so an A/B pair is self-describing.
+    details = {
+        'seal_gold_leak': SEAL_GOLD_LEAK,
+        'hidden_agent_recovery': HIDDEN_AGENT_RECOVERY,
+        'use_instance_image': USE_INSTANCE_IMAGE,
+        'run_with_browsing': RUN_WITH_BROWSING,
+        'use_hint_text': USE_HINT_TEXT,
+        'runtime_extra_build_args': os.environ.get('RUNTIME_EXTRA_BUILD_ARGS'),
+        'docker_runtime_kwargs': os.environ.get('DOCKER_RUNTIME_KWARGS'),
+    }
     _agent_cls = openhands.agenthub.Agent.get_cls(args.agent_cls)
     dataset_descrption = (
         args.dataset.replace('/', '__') + '-' + args.split.replace('/', '__')

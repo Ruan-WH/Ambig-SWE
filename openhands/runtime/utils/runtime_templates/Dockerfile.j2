@@ -2,6 +2,8 @@ FROM {{ base_image }}
 
 # Shared environment variables
 ENV POETRY_VIRTUALENVS_PATH=/openhands/poetry \
+    POETRY_REQUESTS_TIMEOUT=120 \
+    POETRY_INSTALLER_MAX_WORKERS=4 \
     MAMBA_ROOT_PREFIX=/openhands/micromamba \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \

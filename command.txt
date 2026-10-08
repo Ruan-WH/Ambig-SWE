@@ -1,0 +1,27 @@
+cd ~/Ambig-SWE-test
+
+read -rsp '请输入 DeepSeek API Key: ' DEEPSEEK_KEY
+echo
+export DEEPSEEK_KEY
+export DOCKER_RUNTIME_KWARGS='{"mem_limit":"6g","memswap_limit":"8g"}'
+export EXP_NAME='deepseek-v4-flash-hidden-10x70-safe'
+
+mkdir -p evaluation/evaluation_outputs/run_logs
+
+sg docker -c "env \
+-u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+-u ALL_PROXY -u all_proxy \
+PATH='/home/rwh/miniconda3/envs/ambig-swe/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+VIRTUAL_ENV='/home/rwh/miniconda3/envs/ambig-swe' \
+CONDA_PREFIX='/home/rwh/miniconda3/envs/ambig-swe' \
+OPENAI_API_KEY='$DEEPSEEK_KEY' \
+DS_API_KEY='$DEEPSEEK_KEY' \
+DOCKER_RUNTIME_KWARGS='$DOCKER_RUNTIME_KWARGS' \
+EXP_NAME='$EXP_NAME' \
+RUN_WITH_BROWSING=false \
+bash evaluation/benchmarks/swe_bench/scripts/hidden_run_infer.sh \
+deepseek-v4-flash HEAD CodeActAgent 25 150 1 \
+princeton-nlp/SWE-bench_Lite test 1" \
+2>&1 | tee evaluation/evaluation_outputs/run_logs/hidden-continue-21-to-25.log
+
+unset DEEPSEEK_KEY

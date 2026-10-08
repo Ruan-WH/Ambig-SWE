@@ -12,7 +12,7 @@ from litellm import (
     ModelResponse,
 )
 
-from openhands.core.exceptions import FunctionCallNotExistsError
+from openhands.core.exceptions import FunctionCallNotExistsError, LLMNoActionError
 from openhands.core.logger import openhands_logger as logger
 from openhands.events.action import (
     Action,
@@ -542,6 +542,13 @@ def response_to_actions(response: ModelResponse) -> list[Action]:
             )
             actions.append(action)
     else:
+        if not assistant_msg.content or (
+            isinstance(assistant_msg.content, str)
+            and not assistant_msg.content.strip()
+        ):
+            raise LLMNoActionError(
+                'The model returned no visible content or tool call; retry the task.'
+            )
         actions.append(
             MessageAction(content=assistant_msg.content, wait_for_response=True)
         )
