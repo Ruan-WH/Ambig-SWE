@@ -8,6 +8,10 @@ import pandas as pd
 import toml
 
 import openhands.agenthub
+from evaluation.benchmarks.swe_bench.agent_network import (
+    isolated_container_kwargs,
+    restrict_agent_network,
+)
 from evaluation.utils.shared import (
     EvalException,
     EvalMetadata,
@@ -49,6 +53,10 @@ SEAL_GOLD_LEAK = os.environ.get('SEAL_GOLD_LEAK', 'false').lower() == 'true'
 # Experimental recovery prompt for models that repeatedly ask for input instead
 # of editing the repository. Keep it opt-in so previous runs stay comparable.
 HIDDEN_AGENT_RECOVERY = os.environ.get('HIDDEN_AGENT_RECOVERY', 'false').lower() == 'true'
+# Common to A/B/C, independent of gold sealing and recovery.
+HIDDEN_AGENT_NETWORK_ISOLATION = (
+    os.environ.get('HIDDEN_AGENT_NETWORK_ISOLATION', 'true').lower() == 'true'
+)
 
 _KNOWN_FIX_COMMITS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'known_fix_commits.json'
@@ -179,6 +187,10 @@ def get_config(
         base_container_image = SWE_BENCH_CONTAINER_IMAGE
         logger.info(f'Using swe-bench container image: {base_container_image}')
 
+    docker_kwargs = json.loads(os.environ.get('DOCKER_RUNTIME_KWARGS', 'null'))
+    if HIDDEN_AGENT_NETWORK_ISOLATION:
+        docker_kwargs = isolated_container_kwargs(docker_kwargs)
+
     config = AppConfig(
         default_agent=metadata.agent_class,
         run_as_openhands=False,
@@ -191,9 +203,7 @@ def get_config(
             runtime_extra_build_args=json.loads(
                 os.environ.get('RUNTIME_EXTRA_BUILD_ARGS', 'null')
             ),
-            docker_runtime_kwargs=json.loads(
-                os.environ.get('DOCKER_RUNTIME_KWARGS', 'null')
-            ),
+            docker_runtime_kwargs=docker_kwargs,
             # large enough timeout, since some testcases take very long to run
             timeout=300,
             # Add platform to the sandbox config to solve issue 4401
@@ -658,6 +668,8 @@ def process_instance(
 
     try:
         initialize_runtime(runtime, instance, metadata)
+        if HIDDEN_AGENT_NETWORK_ISOLATION:
+            restrict_agent_network(runtime, metadata, str(instance.instance_id))
 
         instruction = get_instruction(instance, metadata)
         # Here's how you can run the agent (similar to the `main` function) and get the final task state
@@ -780,6 +792,7 @@ if __name__ == '__main__':
     details = {
         'seal_gold_leak': SEAL_GOLD_LEAK,
         'hidden_agent_recovery': HIDDEN_AGENT_RECOVERY,
+        'hidden_agent_network_isolation': HIDDEN_AGENT_NETWORK_ISOLATION,
         'use_instance_image': USE_INSTANCE_IMAGE,
         'run_with_browsing': RUN_WITH_BROWSING,
         'use_hint_text': USE_HINT_TEXT,

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import subprocess
 import tempfile
 import uuid
 from importlib.metadata import version
@@ -640,3 +641,84 @@ def test_truncate_hash():
     assert truncated == 'pma2wc71uq3c9a85'
     truncated = truncate_hash('102aecc0cea025253c0278f54ebef078')
     assert truncated == '4titk6gquia3taj5'
+
+
+@pytest.mark.parametrize("mode", list(BuildFromImageType))
+def test_generated_runtime_shell_syntax(mode):
+    content = _generate_dockerfile("debian:11", build_from=mode)
+    for line in content.replace("\\\n", " ").splitlines():
+        if line.startswith("RUN "):
+            subprocess.run(["/bin/sh", "-n", "-c", line[4:]], check=True)
+
+
+@pytest.mark.parametrize(
+    "mode", [BuildFromImageType.SCRATCH, BuildFromImageType.VERSIONED]
+)
+def test_dependency_cache_boundaries(mode):
+    content = _generate_dockerfile("debian:11", build_from=mode)
+    layers = [
+        line[4:]
+        for line in content.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN ")
+    ]
+    python_layer = next(
+        i for i, line in enumerate(layers) if "poetry install --only" in line
+    )
+    apt_layer = next(
+        i for i, line in enumerate(layers) if "playwright install-deps chromium" in line
+    )
+    browser_layer = next(
+        i for i, line in enumerate(layers) if "playwright install chromium" in line
+    )
+    assert python_layer < apt_layer < browser_layer
+    assert "apt-get" not in layers[python_layer]
+    assert "playwright install chromium" not in layers[apt_layer]
+
+
+@pytest.mark.parametrize("failures, expected_code, attempts", [(2, 0, 3), (9, 42, 3)])
+def test_install_retry_is_bounded(failures, expected_code, attempts):
+    content = _generate_dockerfile("debian:11").replace("\\\n", " ")
+    layer = next(
+        line[4:] for line in content.splitlines() if line.startswith("RUN retry()")
+    )
+    helper = layer.split("};", 1)[0] + "};"
+    script = (
+        helper
+        + f"""
+        sleep() {{ :; }}
+        count=0
+        flaky() {{ count=$((count + 1)); [ "$count" -gt {failures} ] || return 42; }}
+        retry flaky
+        result=$?
+        echo "$count"
+        exit "$result"
+    """
+    )
+    result = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == expected_code
+    assert result.stdout.strip() == str(attempts)
+
+
+@pytest.mark.parametrize('proxy', ['', 'DIRECT', 'http://127.0.0.1:7897'])
+def test_ubuntu_apt_route_override(proxy, tmp_path):
+    content = _generate_dockerfile('debian:11').replace('\\\n', ' ')
+    layer = next(
+        line[4:]
+        for line in content.splitlines()
+        if line.startswith('RUN ') and '81openhands-ubuntu-proxy' in line
+    )
+    config = tmp_path / 'apt-proxy.conf'
+    setup = layer.split('fi &&', 1)[0] + 'fi'
+    setup = setup.replace('/etc/apt/apt.conf.d/81openhands-ubuntu-proxy', str(config))
+    subprocess.run(
+        ['/bin/sh', '-c', setup],
+        env={**os.environ, 'OPENHANDS_APT_UBUNTU_PROXY': proxy},
+        check=True,
+    )
+    if proxy:
+        lines = config.read_text().splitlines()
+        assert len(lines) == 4
+        assert all(line.endswith(f'"{proxy}";') for line in lines)
+        assert all('archive.ubuntu.com' in line or 'security.ubuntu.com' in line for line in lines)
+    else:
+        assert not config.exists()

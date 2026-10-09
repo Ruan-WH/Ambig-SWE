@@ -174,3 +174,41 @@ interpretable.
 The workspace probe passes `-` on purpose: it inspects a copy of the already
 sealed `/testbed`, so a known-fix check there is meaningless by construction. The
 confirmation comes from the `testbed` phase.
+
+## Common Agent-stage network isolation (A/B/C)
+
+Hidden runs now default to `HIDDEN_AGENT_NETWORK_ISOLATION=true`, independently
+of `SEAL_GOLD_LEAK` and `HIDDEN_AGENT_RECOVERY`. For the three-arm comparison,
+explicitly export the same value in every arm:
+
+```bash
+export HIDDEN_AGENT_NETWORK_ISOLATION=true
+# A: SEAL_GOLD_LEAK=false, HIDDEN_AGENT_RECOVERY=false
+# B: SEAL_GOLD_LEAK=true,  HIDDEN_AGENT_RECOVERY=false
+# C: SEAL_GOLD_LEAK=true,  HIDDEN_AGENT_RECOVERY=true
+```
+
+Image construction and runtime initialization retain network access. After
+initialization, before the controller/agent starts, the host uses a trusted
+Docker exec to apply IPv4/IPv6 egress rules inside that container's network
+namespace. Local loopback and replies to host-initiated runtime requests remain
+available. New outbound connections, previously established outbound sessions,
+external DNS (including Docker's embedded resolver), and host proxy routes are
+blocked. The host's model API requests are unaffected.
+
+This currently requires a **local Docker runtime**, a private network namespace,
+and no privileged container or added capabilities. Agent processes drop
+`NET_ADMIN` and `NET_RAW`; they cannot clear the policy. Existing cached images
+remain usable: if necessary, `iptables` is installed during setup, before the
+network is restricted. That initial package installation may take extra time.
+
+Each instance writes `network_evidence/<instance_id>.json`, including connectivity
+probes through the actual runtime command channel. Missing tools, inaccessible
+runtime control, or a failed isolation probe abort the instance before Agent
+execution. Metadata records `hidden_agent_network_isolation`.
+
+`HIDDEN_AGENT_NETWORK_ISOLATION=false` reproduces the earlier unrestricted-network
+behavior; do not use it in this A/B/C comparison. No recovery guidance or task
+prompt is added by isolation. Network-dependent repository tests/downloads may
+fail during Agent execution; that restriction is shared across all three arms.
+The separate grader remains unchanged and runs outside the Agent container.
