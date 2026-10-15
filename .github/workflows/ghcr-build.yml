@@ -40,7 +40,7 @@ jobs:
       hash_from_app_image: ${{ steps.get_hash_in_app_image.outputs.hash_from_app_image }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -103,7 +103,7 @@ jobs:
             tag: nikolaik
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -178,7 +178,7 @@ jobs:
       matrix:
         base_image: ['nikolaik']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Cache Poetry dependencies
         uses: actions/cache@v4
         with:
@@ -229,7 +229,7 @@ jobs:
       matrix:
         base_image: ['nikolaik']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -306,7 +306,7 @@ jobs:
       matrix:
         base_image: ['nikolaik']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -404,7 +404,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Get short SHA
         id: short_sha
